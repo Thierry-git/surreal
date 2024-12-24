@@ -7,8 +7,7 @@
 #include <ostream>
 #include <iomanip>
 
-
-
+//////////////////////////////////// CONCEPTS ////////////////////////////////////
 
 template <typename G>
 concept additiveCommutativeGroup = requires (G a, G b, G c) {
@@ -87,48 +86,174 @@ public:
 	: HahnSeries(k, 0) {}
 	// K x G c___> K[[ω^G]]
 	// (k,g) |---> kω^g
-	HahnSeries(K k, G g);
+	HahnSeries(K k, G g){
+		if (k != K(0)) cnf_.emplace(g, k);
+		// else an empty cnf_ represents 0
+	}
 
 
-	// ARITHMETIC
+	// COMPARISON
 
-	//    2w^3 + 1w^1
-	//+  -1w^3 + 4w^0
-	//=   1w^3 + 1w^1 + 4w^0
-	HahnSeries operator+(const HahnSeries& other) const {
+	bool operator==(const HahnSeries& other) const {
+		return cnf_ == other.cnf_;
+	}
+
+	std::strong_ordering operator<=>(const HahnSeries& other) const {
 		auto selfNumeral = cbegin();
 		auto otherNumeral = other.cbegin();
 		const auto selfEnd = cend();
 		const auto otherEnd = other.cend();
 
-		HahnSeries result;
+		while (selfNumeral != selfEnd && otherNumeral != otherEnd) {
+			if (selfNumeral->first != otherNumeral->first) {
+				// Different exponents - check which is larger and the sign of coefficient
+				bool less = selfNumeral->first > otherNumeral->first
+					? selfNumeral->second < K(0)
+					: otherNumeral->second > K(0);
+				return less ? std::strong_ordering::less
+				            : std::strong_ordering::greater;
+			}
+			if (selfNumeral->second != otherNumeral->second) {
+				if (selfNumeral->second < otherNumeral->second)
+					return std::strong_ordering::less;
+				else
+					return std::strong_ordering::greater;
+			}
+			++selfNumeral;
+			++otherNumeral;
+		}
 
+		// If we get here, one or both series are exhausted
+		if (selfNumeral == selfEnd) {
+			if (otherNumeral == otherEnd)
+				return std::strong_ordering::equal;
+			else
+				return otherNumeral->second > K(0)
+					? std::strong_ordering::less
+					: std::strong_ordering::greater;
+		}
+		return selfNumeral->second < K(0)
+			? std::strong_ordering::less
+			: std::strong_ordering::greater;
+	}
+
+
+	// ARITHMETIC
+
+	HahnSeries& operator+=(const HahnSeries& other) {
+		CantorNormalForm result;
+		auto selfNumeral = cbegin();
+		auto otherNumeral = other.cbegin();
+		const auto selfEnd = cend();
+		const auto otherEnd = other.cend();
+		
 		while (selfNumeral != selfEnd && otherNumeral != otherEnd) {
 			if (selfNumeral->first > otherNumeral->first) {
-				result.cnf_.insert(*selfNumeral);
+				result.insert(result.cbegin(), *selfNumeral);
 				++selfNumeral;
-			} else if (otherNumeral->first > selfNumeral->first) {
-				result.cnf_.insert(*otherNumeral);
+			} else if (selfNumeral->first < otherNumeral->first) {
+				result.insert(result.cbegin(), *otherNumeral);
 				++otherNumeral;
 			} else { // same exponent
 				K coefficient = selfNumeral->second + otherNumeral->second;
 				if (coefficient != K(0))
-					result.cnf_.insert({selfNumeral->first, coefficient});
+					result.emplace_hint(result.cbegin(), selfNumeral->first, coefficient);
 				++selfNumeral;
 				++otherNumeral;
 			}
 		}
+		
+		// Copy remaining terms
 		while (selfNumeral != selfEnd) {
-			result.cnf_.insert(*selfNumeral);
+			result.insert(result.cbegin(), *selfNumeral);
 			++selfNumeral;
 		}
 		while (otherNumeral != otherEnd) {
-			result.cnf_.insert(*otherNumeral);
+			result.insert(result.cbegin(), *otherNumeral);
 			++otherNumeral;
 		}
+		
+		// Overwrite cnf_
+		cnf_.swap(result);
+		return *this;
+	}
 
+	HahnSeries operator+(const HahnSeries& other) const {
+		HahnSeries result = *this;
+		result += other;
 		return result;
 	}
+
+	HahnSeries operator-() const {
+		HahnSeries result;
+		for (const auto& numeral : cnf_) {
+			// Know to insert numerals at the front
+			// since they stay in the same order
+			// after negation
+			result.cnf_.emplace_hint(result.cnf_.cbegin(),
+				numeral.first, -numeral.second);
+		}
+		return result;
+	}
+
+	HahnSeries& operator-=(const HahnSeries& other) {
+		return *this += -other;
+	}
+
+	HahnSeries operator-(const HahnSeries& other) const {
+		return *this + (-other);
+	}
+
+	// Performs f*g by distributing each term of f over g
+	// That is, result = Σ(fi * g) where fi are terms of f
+	HahnSeries& operator*=(const HahnSeries& other) {
+		// O(1) check to avoid O(n) map copy when result must be zero
+		if (cnf_.empty() || other.cnf_.empty()) {
+			cnf_.clear();
+			return *this;
+		}
+
+		// Store the original terms and ensure cnf_ is empty for accumulation
+		CantorNormalForm original = cnf_;
+		cnf_.clear();
+		
+		for (const auto& selfNumeral : original) {
+			// Create a HahnSeries representing self_term * other
+			HahnSeries termProduct;
+			for (const auto& otherNumeral : other.cnf_) {
+				K newCoeff = selfNumeral.second * otherNumeral.second;
+				if (newCoeff != K(0)) {
+					G newExp = selfNumeral.first + otherNumeral.first;
+					termProduct.cnf_.emplace_hint(termProduct.cnf_.cbegin(), newExp, newCoeff);
+				}
+			}
+			*this += termProduct;
+		}
+		return *this;
+	}
+
+	HahnSeries operator*(const HahnSeries& other) const {
+		HahnSeries result = *this;
+		result *= other;
+		return result;
+	}
+	
+	// K x K[[ω^G]] ---> K[[ω^G]]
+	// (k,hs) |---> kω^0 * hs
+	template<typename G2, typename K2>
+	friend HahnSeries<G2, K2> operator*(const K2& scalar, const HahnSeries<G2, K2>& series) {
+		return HahnSeries<G2, K2>(scalar) * series;
+	}
+	/*
+	 * Note: K[[ω^G]] x K[[ω^G]] ---> K[[ω^G]] is
+	 * defined by implicit casting of K to K[[ω^G]]
+	 * and yield the same result as the above.
+	*/ 
+
+	// TODO: division
+
+	// Note: Exponentiation is not defined at the level
+	// of the Hahn series field.
 
 
 	// DISPLAY
@@ -163,10 +288,10 @@ public:
 	// ITERATION
 	
 	// Order is flipped to correspond to exploring higher numerals first
-	auto begin()        { return cnf_.rbegin();  }
-	auto cbegin() const { return cnf_.crbegin(); }
-	auto end()          { return cnf_.rend();    }
-	auto cend()   const { return cnf_.crend();   }
+	typename CantorNormalForm::reverse_iterator       begin()        { return cnf_.rbegin();  }
+	typename CantorNormalForm::const_reverse_iterator cbegin() const { return cnf_.crbegin(); }
+	typename CantorNormalForm::reverse_iterator       end()          { return cnf_.rend();    }
+	typename CantorNormalForm::const_reverse_iterator cend()   const { return cnf_.crend();   }
 
 
 private:
@@ -181,10 +306,3 @@ private:
 
 
 //////////////////////////////////// IMPLEMENTATION ////////////////////////////////////
-
-template <field K, totallyOrderedAdditiveCommutativeGroup G>
-HahnSeries<K, G>::HahnSeries(K k, G g) {
-	if (k != K(0)) cnf_.emplace(g, k);
-	// else an empty cnf_ represents 0
-}
-
